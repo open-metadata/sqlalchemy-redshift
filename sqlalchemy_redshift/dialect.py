@@ -499,7 +499,9 @@ class RedshiftDialectMixin(object):
                 default=col.default, notnull=col.notnull, domains=domains,
                 enums=[], schema=col.schema, encode=col.encode,
                 comment=col.comment)
+
             columns.append(column_info)
+
         return columns
 
     @reflection.cache
@@ -566,7 +568,7 @@ class RedshiftDialectMixin(object):
         Overrides interface
         :meth:`~sqlalchemy.engine.interfaces.Dialect.get_table_names`.
         """
-        return self._get_table_or_view_names('r', connection, schema, **kw)
+        return self._get_table_or_view_names(['r', 'e'], connection, schema, **kw)
 
     @reflection.cache
     def get_view_names(self, connection, schema=None, **kw):
@@ -576,7 +578,7 @@ class RedshiftDialectMixin(object):
         Overrides interface
         :meth:`~sqlalchemy.engine.interfaces.Dialect.get_view_names`.
         """
-        return self._get_table_or_view_names('v', connection, schema, **kw)
+        return self._get_table_or_view_names(['v'], connection, schema, **kw)
 
     @reflection.cache
     def get_view_definition(self, connection, view_name, schema=None, **kw):
@@ -660,7 +662,7 @@ class RedshiftDialectMixin(object):
             'redshift_interleaved_sortkey': interleaved_sortkey,
         }
 
-    def _get_table_or_view_names(self, relkind, connection, schema=None, **kw):
+    def _get_table_or_view_names(self, relkinds, connection, schema=None, **kw):
         default_schema = inspect(connection).default_schema_name
         if not schema:
             schema = default_schema
@@ -669,7 +671,7 @@ class RedshiftDialectMixin(object):
                                                     info_cache=info_cache)
         relation_names = []
         for key, relation in all_relations.items():
-            if key.schema == schema and relation.relkind == relkind:
+            if key.schema == schema and relation.relkind in relkinds:
                 relation_names.append(key.name)
         return relation_names
 
@@ -690,9 +692,14 @@ class RedshiftDialectMixin(object):
             *args,
             **kw
         )
+        column_info['raw_type'] = kw['format_type']
+
         if isinstance(column_info['type'], VARCHAR):
             if column_info['type'].length is None:
                 column_info['type'] = NullType()
+        if re.match('char', column_info['raw_type']):
+            column_info['type'] = CHAR
+
         if 'info' not in column_info:
             column_info['info'] = {}
         if encode and encode != 'none':
@@ -762,6 +769,17 @@ class RedshiftDialectMixin(object):
         for rel in result:
             key = RelationKey(rel.relname, rel.schema, connection)
             relations[key] = rel
+
+        result = connection.execute("""
+                SELECT
+                  schemaname as "schema",
+                  tablename as "relname",
+                  'e' as relkind
+                FROM svv_external_tables;
+                """)
+        for rel in result:
+            key = RelationKey(rel.relname, rel.schema, connection)
+            relations[key] = rel
         return relations
 
     # We fetch column info an entire schema at a time to improve performance
@@ -828,6 +846,39 @@ class RedshiftDialectMixin(object):
               col_type varchar,
               col_num int)
             WHERE 1 {schema_clause}
+            UNION
+            SELECT schemaname AS "schema",
+               tablename AS "table_name",
+               columnname AS "name",
+               null AS "encode",
+               -- Spectrum represents data types differently.
+               -- Standardize, so we can infer types.
+               CASE
+                 WHEN external_type = 'int' THEN 'integer'
+                 ELSE
+                   replace(
+                    replace(external_type, 'decimal', 'numeric'),
+                    'varchar', 'character varying')
+                 END
+                    AS "type",
+               null AS "distkey",
+               0 AS "sortkey",
+               null AS "notnull",
+               null AS "comment",
+               null AS "adsrc",
+               null AS "attnum",
+               CASE
+                 WHEN external_type = 'int' THEN 'integer'
+                 ELSE
+                   replace(
+                    replace(external_type, 'decimal', 'numeric'),
+                    'varchar', 'character varying')
+                 END
+                    AS "format_type",
+               null AS "default",
+               null AS "schema_oid",
+               null AS "table_oid"
+            FROM svv_external_columns
             ORDER BY "schema", "table_name", "attnum";
             """.format(schema_clause=schema_clause)
             )
