@@ -692,12 +692,12 @@ class RedshiftDialectMixin(object):
             *args,
             **kw
         )
-        column_info['raw_type'] = kw['format_type']
+        column_info['raw_data_type'] = kw['format_type']
 
         if isinstance(column_info['type'], VARCHAR):
             if column_info['type'].length is None:
                 column_info['type'] = NullType()
-        if re.match('char', column_info['raw_type']):
+        if re.match('char', column_info['raw_data_type']):
             column_info['type'] = CHAR
 
         if 'info' not in column_info:
